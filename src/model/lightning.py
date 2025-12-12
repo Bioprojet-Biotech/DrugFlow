@@ -420,7 +420,7 @@ class DrugFlow(pl.LightningModule):
 
         self.ligand_metrics = MoleculeValidity()
         self.molecule_properties = MolecularProperties()
-        self.evaluator = FullEvaluator(gnina=self.gnina, exclude_evaluators=['geometry', 'ring_count'])
+        self.evaluator = FullEvaluator(gnina=self.gnina, exclude_evaluators=['geometry', 'ring_count', 'energy', 'posebusters', 'gnina'])
         self.ligand_atom_type_distribution = self._load_histogram('atom')
         self.ligand_bond_type_distribution = self._load_histogram('bond')
 
@@ -545,8 +545,10 @@ class DrugFlow(pl.LightningModule):
         z0_h = self.module_h.sample_z0(ligand['mask'])
         z0_e = self.module_e.sample_z0(ligand['bond_mask'])
         zt_x = self.module_x.sample_zt(z0_x, ligand['x'], t, ligand['mask'])
-        zt_h = self.module_h.sample_zt(z0_h, ligand['one_hot'], t, ligand['mask'])
-        zt_e = self.module_e.sample_zt(z0_e, ligand['bond_one_hot'], t, ligand['bond_mask'])
+        # zt_h = self.module_h.sample_zt(z0_h, ligand['one_hot'], t, ligand['mask'])
+        # zt_e = self.module_e.sample_zt(z0_e, ligand['bond_one_hot'], t, ligand['bond_mask'])
+        zt_h = ligand['one_hot']
+        zt_e = ligand['bond_one_hot']
 
         if self.flexible_bb:
             z0_trans = self.module_trans.sample_z0(pocket_com, pocket['mask'])
@@ -600,79 +602,80 @@ class DrugFlow(pl.LightningModule):
             loss_x = self.module_x.compute_loss(pred_ligand['vel'], z0_x, ligand['x'], t, ligand['mask'], reduce=self.loss_reduce)
 
         # Loss for categorical variables
-        t_next = torch.clamp(t + self.train_step_size, max=1.0)
-        loss_h = self.module_h.compute_loss(pred_ligand['logits_h'], zt_h, ligand['one_hot'], ligand['mask'], t, t_next, reduce=self.loss_reduce)
-        loss_e = self.module_e.compute_loss(pred_ligand['logits_e'], zt_e, ligand['bond_one_hot'], ligand['bond_mask'], t, t_next, reduce=self.loss_reduce)
+        # t_next = torch.clamp(t + self.train_step_size, max=1.0)
+        # loss_h = self.module_h.compute_loss(pred_ligand['logits_h'], zt_h, ligand['one_hot'], ligand['mask'], t, t_next, reduce=self.loss_reduce)
+        # loss_e = self.module_e.compute_loss(pred_ligand['logits_e'], zt_e, ligand['bond_one_hot'], ligand['bond_mask'], t, t_next, reduce=self.loss_reduce)
 
-        loss = self.lambda_x * loss_x + self.lambda_h * loss_h + self.lambda_e * loss_e
-        if self.flexible:
-            loss_chi = self.module_chi.compute_loss(pred_residues['chi'], z0_chi, z1_chi, zt_chi, t, pocket['mask'], reduce=self.loss_reduce)
-            loss = loss + self.lambda_chi * loss_chi
+        # loss = self.lambda_x * loss_x + self.lambda_h * loss_h + self.lambda_e * loss_e
+        # if self.flexible:
+        #     loss_chi = self.module_chi.compute_loss(pred_residues['chi'], z0_chi, z1_chi, zt_chi, t, pocket['mask'], reduce=self.loss_reduce)
+        #     loss = loss + self.lambda_chi * loss_chi
 
-        if self.flexible_bb:
-            loss_trans = self.module_trans.compute_loss(pred_residues['trans'], z0_trans, z1_trans, t, pocket['mask'], reduce=self.loss_reduce)
-            loss_rot = self.module_rot.compute_loss(pred_residues['rot'], z0_rot, z1_rot, zt_rot, t, pocket['mask'], reduce=self.loss_reduce)
-            loss = loss + self.lambda_trans * loss_trans + self.lambda_rot * loss_rot
+        # if self.flexible_bb:
+        #     loss_trans = self.module_trans.compute_loss(pred_residues['trans'], z0_trans, z1_trans, t, pocket['mask'], reduce=self.loss_reduce)
+        #     loss_rot = self.module_rot.compute_loss(pred_residues['rot'], z0_rot, z1_rot, zt_rot, t, pocket['mask'], reduce=self.loss_reduce)
+        #     loss = loss + self.lambda_trans * loss_trans + self.lambda_rot * loss_rot
 
-        if self.lambda_clash is not None and self.lambda_clash > 0:
+        # if self.lambda_clash is not None and self.lambda_clash > 0:
 
-            if self.flexible_bb:
-                pred_z1_trans = self.module_trans.get_z1_given_zt_and_pred(zt_trans, pred_residues['trans'], z0_trans, t, pocket['mask'])
-                pred_z1_rot = self.module_rot.get_z1_given_zt_and_pred(zt_rot, pred_residues['rot'], z0_rot, t, pocket['mask'])
-                pocket.set_frame(pred_z1_trans, pred_z1_rot)
+        #     if self.flexible_bb:
+        #         pred_z1_trans = self.module_trans.get_z1_given_zt_and_pred(zt_trans, pred_residues['trans'], z0_trans, t, pocket['mask'])
+        #         pred_z1_rot = self.module_rot.get_z1_given_zt_and_pred(zt_rot, pred_residues['rot'], z0_rot, t, pocket['mask'])
+        #         pocket.set_frame(pred_z1_trans, pred_z1_rot)
 
-            if self.flexible:
-                # internal to external coordinates
-                pred_z1_chi = self.module_chi.get_z1_given_zt_and_pred(zt_chi, pred_residues['chi'], z0_chi, t, pocket['mask'])
-                pocket.set_chi(pred_z1_chi)
+        #     if self.flexible:
+        #         # internal to external coordinates
+        #         pred_z1_chi = self.module_chi.get_z1_given_zt_and_pred(zt_chi, pred_residues['chi'], z0_chi, t, pocket['mask'])
+        #         pocket.set_chi(pred_z1_chi)
 
-            pocket_coord = pocket['x'].unsqueeze(1) + pocket['v']
-            pocket_types = aa_atom_type_tensor[pocket['one_hot'].argmax(dim=-1)]
-            pocket_mask = pocket['mask'].unsqueeze(-1).repeat((1, pocket['v'].size(1)))
+        #     pocket_coord = pocket['x'].unsqueeze(1) + pocket['v']
+        #     pocket_types = aa_atom_type_tensor[pocket['one_hot'].argmax(dim=-1)]
+        #     pocket_mask = pocket['mask'].unsqueeze(-1).repeat((1, pocket['v'].size(1)))
 
-            # Extract only existing atoms
-            atom_mask = aa_atom_mask_tensor[pocket['one_hot'].argmax(dim=-1)]
-            pocket_coord = pocket_coord[atom_mask]
-            pocket_types = pocket_types[atom_mask]
-            pocket_mask = pocket_mask[atom_mask]
+        #     # Extract only existing atoms
+        #     atom_mask = aa_atom_mask_tensor[pocket['one_hot'].argmax(dim=-1)]
+        #     pocket_coord = pocket_coord[atom_mask]
+        #     pocket_types = pocket_types[atom_mask]
+        #     pocket_mask = pocket_mask[atom_mask]
 
-            # pred_z1_x = pred_x + z0_x
-            pred_z1_x = self.module_x.get_z1_given_zt_and_pred(zt_x, pred_ligand['vel'], z0_x, t, ligand['mask'])
-            pred_z1_h = pred_ligand['logits_h'].argmax(dim=-1)
-            loss_clash = clash_loss(pred_z1_x, pred_z1_h, ligand['mask'],
-                                    pocket_coord, pocket_types, pocket_mask)
-            loss = loss + self.lambda_clash * loss_clash
+        #     # pred_z1_x = pred_x + z0_x
+        #     pred_z1_x = self.module_x.get_z1_given_zt_and_pred(zt_x, pred_ligand['vel'], z0_x, t, ligand['mask'])
+        #     pred_z1_h = pred_ligand['logits_h'].argmax(dim=-1)
+        #     loss_clash = clash_loss(pred_z1_x, pred_z1_h, ligand['mask'],
+        #                             pocket_coord, pocket_types, pocket_mask)
+        #     loss = loss + self.lambda_clash * loss_clash
 
-        if self.timestep_weights is not None:
-            w_t = self.timestep_weights(t).squeeze()
-            loss = w_t * loss
+        # if self.timestep_weights is not None:
+        #     w_t = self.timestep_weights(t).squeeze()
+        #     loss = w_t * loss
 
-        loss = loss.mean(0)
+        loss = loss_x.mean(0)
 
         info = {
             'loss_x': loss_x.mean().item(),
-            'loss_h': loss_h.mean().item(),
-            'loss_e': loss_e.mean().item(),
+            # 'loss_h': loss_h.mean().item(),
+            # 'loss_e': loss_e.mean().item(),
         }
-        if self.flexible:
-            info['loss_chi'] = loss_chi.mean().item()
-        if self.flexible_bb:
-            info['loss_trans'] = loss_trans.mean().item()
-            info['loss_rot'] = loss_rot.mean().item()
-        if self.lambda_clash is not None:
-            info['loss_clash'] = loss_clash.mean().item()
+        # if self.flexible:
+        #     info['loss_chi'] = loss_chi.mean().item()
+        # if self.flexible_bb:
+        #     info['loss_trans'] = loss_trans.mean().item()
+        #     info['loss_rot'] = loss_rot.mean().item()
+        # if self.lambda_clash is not None:
+        #     info['loss_clash'] = loss_clash.mean().item()
         if self.predict_confidence:
             sigma_x_mol = scatter_mean(pred_ligand['uncertainty_vel'], ligand['mask'], dim=0)
             info['pearson_sigma_x'] = torch.corrcoef(torch.stack([sigma_x_mol.detach(), t.squeeze()]))[0, 1].item()
             info['mean_sigma_x'] = sigma_x_mol.mean().item()
-            entropy_h = Categorical(logits=pred_ligand['logits_h']).entropy()
-            entropy_h_mol = scatter_mean(entropy_h, ligand['mask'], dim=0)
-            info['pearson_entropy_h'] = torch.corrcoef(torch.stack([entropy_h_mol.detach(), t.squeeze()]))[0, 1].item()
-            info['mean_entropy_h'] = entropy_h_mol.mean().item()
-            entropy_e = Categorical(logits=pred_ligand['logits_e']).entropy()
-            entropy_e_mol = scatter_mean(entropy_e, ligand['bond_mask'], dim=0)
-            info['pearson_entropy_e'] = torch.corrcoef(torch.stack([entropy_e_mol.detach(), t.squeeze()]))[0, 1].item()
-            info['mean_entropy_e'] = entropy_e_mol.mean().item()
+
+            # entropy_h = Categorical(logits=pred_ligand['logits_h']).entropy()
+            # entropy_h_mol = scatter_mean(entropy_h, ligand['mask'], dim=0)
+            # info['pearson_entropy_h'] = torch.corrcoef(torch.stack([entropy_h_mol.detach(), t.squeeze()]))[0, 1].item()
+            # info['mean_entropy_h'] = entropy_h_mol.mean().item()
+            # entropy_e = Categorical(logits=pred_ligand['logits_e']).entropy()
+            # entropy_e_mol = scatter_mean(entropy_e, ligand['bond_mask'], dim=0)
+            # info['pearson_entropy_e'] = torch.corrcoef(torch.stack([entropy_e_mol.detach(), t.squeeze()]))[0, 1].item()
+            # info['mean_entropy_e'] = entropy_e_mol.mean().item()
 
         return (loss, info) if return_info else loss
 
@@ -803,10 +806,10 @@ class DrugFlow(pl.LightningModule):
             pocket_copy = batch['pocket'].copy()
 
             if len(batch['pocket']['x']) > 0:
-                ligand_chain, pocket_chain, info = self.sample_chain(batch['pocket'], self.keep_frames)
+                ligand_chain, pocket_chain, info = self.sample_chain(batch['ligand'], batch['pocket'], self.keep_frames)
             else:
                 num_nodes, _ = self.size_distribution.sample()
-                ligand_chain, pocket_chain, info = self.sample_chain(batch['pocket'], self.keep_frames, num_nodes=num_nodes)
+                ligand_chain, pocket_chain, info = self.sample_chain(batch['ligand'], batch['pocket'], self.keep_frames, num_nodes=num_nodes)
 
             # utils.write_sdf_file(Path(outdir, 'chain_pocket.sdf'), pocket_chain)
             # utils.write_chain(Path(outdir, 'chain_pocket.xyz'), pocket_chain)
@@ -980,8 +983,8 @@ class DrugFlow(pl.LightningModule):
         zt_ligand = zs_ligand.copy()
         zt_ligand['x'] = self.module_x.sample_zt_given_zs(zs_ligand['x'], pred_ligand['vel'], s, t, zs_ligand['mask'])
 
-        zt_ligand['h'] = self.module_h.sample_zt_given_zs(zs_ligand['h'], pred_ligand['logits_h'], s, t, zs_ligand['mask'])
-        zt_ligand['e'] = self.module_e.sample_zt_given_zs(zs_ligand['e'], pred_ligand['logits_e'], s, t, zs_ligand['edge_mask'])
+        # zt_ligand['h'] = self.module_h.sample_zt_given_zs(zs_ligand['h'], pred_ligand['logits_h'], s, t, zs_ligand['mask'])
+        # zt_ligand['e'] = self.module_e.sample_zt_given_zs(zs_ligand['e'], pred_ligand['logits_e'], s, t, zs_ligand['edge_mask'])
 
         zt_pocket = zs_pocket.copy()
         if self.flexible_bb:
@@ -1209,6 +1212,11 @@ class DrugFlow(pl.LightningModule):
             ligand = self.init_ligand(num_nodes, _ligand)
         pocket = self.init_pocket(pocket)
 
+        # from pdb import set_trace; set_trace()
+
+        ligand['h'] = _ligand['one_hot']
+        ligand['e'] = _ligand['bond_one_hot']
+
         # return prior samples
         if timesteps == 0:
             # Convert into rdmols
@@ -1274,7 +1282,7 @@ class DrugFlow(pl.LightningModule):
         return rdmols, rdpockets, _ligand['name']
 
     @torch.no_grad()
-    def sample_chain(self, pocket, keep_frames, num_nodes=None, timesteps=None,
+    def sample_chain(self, _ligand, pocket, keep_frames, num_nodes=None, timesteps=None,
                      guide_log_prob=None, **kwargs):
 
         # TODO: move somewhere else (like collate_fn)
@@ -1291,7 +1299,8 @@ class DrugFlow(pl.LightningModule):
         # # Pocket's initial center of mass
         # pocket_com_before = scatter_mean(pocket['x'], pocket['mask'], dim=0)
 
-        num_nodes = self.parse_num_nodes_spec(batch={"pocket": pocket}, spec=num_nodes)
+        # num_nodes = self.parse_num_nodes_spec(batch={"pocket": pocket}, spec=num_nodes)
+        num_nodes = _ligand['size']
 
         # Sample from prior
         if pocket['x'].numel() > 0:
@@ -1299,6 +1308,10 @@ class DrugFlow(pl.LightningModule):
         else:
             dummy_pocket = Residues.empty(pocket['x'].device)
             ligand = self.init_ligand(num_nodes, dummy_pocket)
+
+        # from pdb import set_trace; set_trace()
+        ligand['h'] = _ligand['one_hot'].to(ligand['x'].device)
+        ligand['e'] = _ligand['bond_one_hot'].to(ligand['x'].device)
 
         pocket = self.init_pocket(pocket)
 

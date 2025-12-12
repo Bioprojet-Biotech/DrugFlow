@@ -108,7 +108,6 @@ def split_entity(
         index_types={'bonds'}, 
         edge_types={'bond_one_hot', 'bond_mask'}, 
         no_split={'name', 'size', 'n_bonds'}, 
-        skip={'fragments'},
         batch_mask=None, 
         edge_mask=None
     ):
@@ -121,8 +120,7 @@ def split_entity(
     batch_size = len(torch.unique(batch['mask']))
     out = {}
     for prop in batch.keys():
-        if prop in skip:
-            continue
+
         if prop in no_split:
             out[prop] = batch[prop]  # already a list
 
