@@ -11,6 +11,7 @@ import torch
 from tqdm import tqdm
 import pandas as pd
 from itertools import combinations
+import logging
 
 import sys
 basedir = Path(__file__).resolve().parent.parent.parent
@@ -26,7 +27,7 @@ def parse_args():
     parser.add_argument('--ignore-missing-scores', action='store_true')
     parser.add_argument('--datadir', type=Path, required=True)
     parser.add_argument('--dpo-criterion', type=str, default='reos.all', 
-                        choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency','combined'])
+                        choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency','enamine.avail','combined'])
     parser.add_argument('--basedir', type=Path, default=None)
     parser.add_argument('--pocket', type=str, default='CA+',
                         choices=['side_chain_bead', 'CA+'])
@@ -80,6 +81,10 @@ def return_winning_losing_smpl(score_1, score_2, criterion):
         if np.abs(score_1 - score_2) < 0.1:
             return None
         return score_1 < score_2
+    elif criterion == 'enamine.avail':
+        if score_1 == score_2:
+            return None
+        return score_1 > score_2
     elif criterion == 'combined':
         score_reos_1, score_reos_2 = score_1['reos.all'], score_2['reos.all']
         score_sa_1, score_sa_2 = score_1['medchem.sa'], score_2['medchem.sa']
@@ -113,14 +118,14 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                     continue
                 smiles = rdmol_to_smiles(mol)
             except Exception as e:
-                print('Failed to read ligand:', lig_path)
+                logging.error(f'Failed to read ligand: {lig_path} with error: {e}')
                 continue
             
             if precomp_scores is not None and str(lig_path) in precomp_scores.index:
                 mol_props = precomp_scores.loc[str(lig_path)].to_dict()
                 if criterion == 'combined':
                     if not 'reos.all' in mol_props or not 'medchem.sa' in mol_props or not 'medchem.qed' in mol_props or not 'gnina.vina_efficiency' in mol_props:
-                        print(f'Missing combined scores for ligand:', lig_path)
+                        logging.debug(f'Missing combined scores for ligand: {lig_path}')
                         continue
                     mol_props['combined'] = {
                         'reos.all': mol_props['reos.all'],
@@ -133,9 +138,9 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                 mol_props = {}
             if criterion not in mol_props:
                 if ignore_missing_scores:
-                    print(f'Missing {criterion} for ligand:', lig_path)
+                    logging.debug(f'Missing {criterion} for ligand: {lig_path}')
                     continue
-                print(f'Recomputing {criterion} for ligand:', lig_path)
+                logging.debug(f'Recomputing {criterion} for ligand: {lig_path}')
                 try:
                     eval_res = evaluator.evaluate(mol)
                     criterion_cat = criterion.split('.')[0]
@@ -148,9 +153,9 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
 
             if 'posebusters.all' not in mol_props:
                 if ignore_missing_scores:
-                    print('Missing PoseBusters for ligand:', lig_path)
+                    logging.debug(f'Missing PoseBusters for ligand: {lig_path}')
                     continue
-                print('Recomputing PoseBusters for ligand:', lig_path)
+                logging.debug(f'Recomputing PoseBusters for ligand: {lig_path}')
                 try:
                     pose_eval_res = pose_evaluator.evaluate(lig_path, pocket)
                 except:
@@ -226,7 +231,7 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                 d['score_l'] = losing['score']['combined']
             samples.append(d)                
         
-        pbar.set_postfix({'samples': len(samples)})
+        pbar.set_postfix({'added pairs': len(samples)})
         
         if toy and len(samples) >= toy_size:
             break
@@ -248,6 +253,12 @@ def main():
             raise ValueError('For combined criterion, detailed metrics file has to be provided')
         if not args.ignore_missing_scores:
             raise ValueError('For combined criterion, --ignore-missing-scores flag has to be set')
+    elif 'enamine' in args.dpo_criterion:
+        evaluator = None # enamine availability is checked via detailed metrics file
+        if args.metrics_detailed is None:
+            raise ValueError('For enamine.avail criterion, detailed metrics file has to be provided')
+        if not args.ignore_missing_scores:
+            raise ValueError('For enamine.avail criterion, --ignore-missing-scores flag has to be set')
     else:
         raise ValueError(f"Unknown DPO criterion: {args.dpo_criterion}")
     
@@ -263,28 +274,28 @@ def main():
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     if (processed_dir / f'samples_{args.dpo_criterion}.csv').exists():
-        print(f"Samples already computed for criterion {args.dpo_criterion}, loading from file")
+        logging.info(f"Samples already computed for criterion {args.dpo_criterion}, loading from file")
         samples = pd.read_csv(processed_dir / f'samples_{args.dpo_criterion}.csv')
         samples = [dict(row) for _, row in samples.iterrows()]
-        print(f"Found {len(samples)} winning/losing samples")
+        logging.info(f"Found {len(samples)} winning/losing samples")
     else:
-        print('Scanning sample directory...')
+        logging.info('Scanning sample directory...')
         samples_dir = Path(args.smplsdir)
         # scan dir
         sample_dirs = scan_smpl_dir(samples_dir)
         if args.metrics_detailed:
-            print(f'Loading precomputed scores from {args.metrics_detailed}')
+            logging.info(f'Loading precomputed scores from {args.metrics_detailed}')
             precomp_scores = pd.read_csv(args.metrics_detailed)
             precomp_scores = precomp_scores.set_index('sdf_file')
         else:
             precomp_scores = None
-        print(f'Found {len(sample_dirs)} valid sample directories')
-        print('Computing scores...')
+        logging.info(f'Found {len(sample_dirs)} valid sample directories')
+        logging.info('Computing scores...')
         samples = compute_scores(sample_dirs, evaluator, args.dpo_criterion, 
                                  n_pairs=args.n_pairs, toy=args.toy, toy_size=args.toy_size,
                                     precomp_scores=precomp_scores,
                                     ignore_missing_scores=args.ignore_missing_scores)
-        print(f'Found {len(samples)} winning/losing samples, saving to file')
+        logging.info(f'Found {len(samples)} winning/losing samples, saving to file')
         pd.DataFrame(samples).to_csv(Path(processed_dir, f'samples_{args.dpo_criterion}.csv'), index=False)
 
     data_split = {}
@@ -297,7 +308,7 @@ def main():
 
     for split in data_split.keys():
 
-        print(f"Processing {split} dataset...")
+        logging.info(f"Processing {split} dataset...")
 
         ligands_w = defaultdict(list)
         ligands_l = defaultdict(list)
@@ -372,19 +383,22 @@ def main():
     shutil.copy(metadata_p, processed_dir)
 
     # cp val and test .pt and dirs
-    val_dir = Path(args.datadir, 'val')
-    test_dir = Path(args.datadir, 'test')
     val_pt = Path(args.datadir, 'val.pt')
     test_pt = Path(args.datadir, 'test.pt')
-    assert val_dir.exists() and test_dir.exists() and val_pt.exists() and test_pt.exists()
-    if (processed_dir / 'val').exists():
-        shutil.rmtree(processed_dir / 'val')
-    if (processed_dir / 'test').exists():
-        shutil.rmtree(processed_dir / 'test')
-    shutil.copytree(val_dir, processed_dir / 'val')
-    shutil.copytree(test_dir, processed_dir / 'test')
+    assert val_pt.exists() and test_pt.exists()
     shutil.copy(val_pt, processed_dir)
     shutil.copy(test_pt, processed_dir)
+
+    val_dir = Path(args.datadir, 'val')
+    test_dir = Path(args.datadir, 'test')
+    if val_dir.exists():
+        if (processed_dir / 'val').exists():
+            shutil.rmtree(processed_dir / 'val')
+        shutil.copytree(val_dir, processed_dir / 'val')
+    if test_dir.exists():
+        if (processed_dir / 'test').exists():
+            shutil.rmtree(processed_dir / 'test')
+        shutil.copytree(test_dir, processed_dir / 'test')
 
     # Write error report
     error_str = ""

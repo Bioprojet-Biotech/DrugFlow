@@ -3,6 +3,7 @@ from typing import Union, Iterable
 import random
 # import argparse
 from argparse import Namespace
+import logging
 
 import numpy as np
 import torch
@@ -309,3 +310,9 @@ def namespace_to_dict(x):
     for key, value in x.items():
         output[key] = namespace_to_dict(value)
     return output
+
+
+def setup_logging(verbose=False):
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.getLogger().setLevel(level)

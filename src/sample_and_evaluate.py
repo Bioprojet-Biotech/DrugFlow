@@ -4,6 +4,7 @@ import yaml
 import torch
 import numpy as np
 import pickle
+import logging
 from argparse import Namespace
 
 from pathlib import Path
@@ -30,12 +31,12 @@ def combine(base_args, override_args):
     arg_dict = base_args.__dict__
     for key, value in override_args.__dict__.items():
         if key not in arg_dict or arg_dict[key] is None:  # parameter not provided previously
-            print(f"Add parameter {key}: {value}")
+            logging.info(f"Add parameter {key}: {value}")
             arg_dict[key] = value
         elif isinstance(value, Namespace):
             arg_dict[key] = combine(arg_dict[key], value)
         else:
-            print(f"Replace parameter {key}: {arg_dict[key]} -> {value}")
+            logging.info(f"Replace parameter {key}: {arg_dict[key]} -> {value}")
             arg_dict[key] = value
     return base_args
 
@@ -50,19 +51,19 @@ def path_to_str(input_dict):
 
 
 def sample(cfg, model_params, samples_dir, job_id=0, n_jobs=1):
-    print('Sampling...')
+    logging.info('Sampling...')
     model = DrugFlow.load_from_checkpoint(cfg.checkpoint, map_location=cfg.device, strict=False,
                                           **model_params)
     model.setup(stage='fit' if cfg.set == 'train' else cfg.set)
     model.eval().to(cfg.device)
 
     dataloader = getattr(model, f'{cfg.set}_dataloader')()
-    print(f'Real batch size is {dataloader.batch_size * cfg.n_samples}')
+    logging.info(f'Real batch size is {dataloader.batch_size * cfg.n_samples}')
 
     name2count = {}
     for i, data in enumerate(tqdm(dataloader)):
         if i % n_jobs != job_id:
-            print(f'Skipping batch {i}')
+            logging.info(f'Skipping batch {i}')
             continue
 
         new_data = {
@@ -78,7 +79,7 @@ def sample(cfg, model_params, samples_dir, job_id=0, n_jobs=1):
         except Exception as e:
             if cfg.set == 'train':
                 names = data['ligand']['name']
-                print(f'Failed to sample for {names}: {e}')
+                logging.info(f'Failed to sample for {names}: {e}')
                 continue
             else:
                 raise e
@@ -108,7 +109,7 @@ def sample(cfg, model_params, samples_dir, job_id=0, n_jobs=1):
 
 
 def evaluate(cfg, model_params, samples_dir):
-    print('Evaluation...')
+    logging.info('Evaluation...')
     data, table_detailed, table_aggregated = compute_all_metrics_drugflow(
         in_dir=samples_dir,
         gnina_path=model_params['train_params'].gnina,
@@ -128,7 +129,10 @@ if __name__ == "__main__":
     p.add_argument('--config', type=str)
     p.add_argument('--job_id', type=int, default=0, help='Job ID')
     p.add_argument('--n_jobs', type=int, default=1, help='Number of jobs')
+    p.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     args = p.parse_args()
+
+    utils.setup_logging(verbose=args.verbose)
 
     with open(args.config, 'r') as f:
         cfg = yaml.safe_load(f)
