@@ -3,7 +3,6 @@ from pathlib import Path
 import numpy as np
 import random
 import shutil
-import os
 from time import time
 from collections import defaultdict
 from Bio.PDB import PDBParser
@@ -13,9 +12,6 @@ from tqdm import tqdm
 import pandas as pd
 from itertools import combinations
 import logging
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
-import itertools
 
 import sys
 basedir = Path(__file__).resolve().parent.parent.parent
@@ -43,10 +39,12 @@ def parse_args():
     parser.add_argument('--toy', action='store_true')
     parser.add_argument('--toy_size', type=int, default=100)
     parser.add_argument('--n_pairs', type=int, default=5)
+    parser.add_argument('--job_id', type=int, default=0, help='Job ID')
+    parser.add_argument('--n_jobs', type=int, default=1, help='Number of jobs')
     args = parser.parse_args()
     return args
 
-def scan_smpl_dir(samples_dir, precomp_scores=None):
+def scan_smpl_dir(samples_dir, precomp_scores=None, job_id=0, n_jobs=1):
     if precomp_scores is not None:
         logging.info("Using precomputed scores to identify valid directories")
         paths = [Path(p) for p in precomp_scores.index]
@@ -57,13 +55,30 @@ def scan_smpl_dir(samples_dir, precomp_scores=None):
             if parent not in seen:
                 seen.add(parent)
                 subdirs.append(parent)
+        
+        subdirs = sorted(subdirs)
+        if n_jobs > 1:
+            chunk_size = len(subdirs) // n_jobs
+            start_idx = job_id * chunk_size
+            end_idx = start_idx + chunk_size if job_id < n_jobs - 1 else len(subdirs)
+            subdirs = subdirs[start_idx:end_idx]
+
         return subdirs
 
     samples_dir = Path(samples_dir)
+    
+    all_subdirs = sorted([d for d in samples_dir.iterdir() if d.is_dir()])
+
+    if n_jobs > 1:
+        chunk_size = len(all_subdirs) // n_jobs
+        start_idx = job_id * chunk_size
+        end_idx = start_idx + chunk_size if job_id < n_jobs - 1 else len(all_subdirs)
+        my_subdirs = all_subdirs[start_idx:end_idx]
+    else:
+        my_subdirs = all_subdirs
+
     subdirs = []
-    for subdir in tqdm(samples_dir.iterdir(), desc='Scanning samples'):
-        if not subdir.is_dir():
-            continue
+    for subdir in tqdm(my_subdirs, desc=f'Scanning samples (job {job_id})'):
         if not sample_dir_valid(subdir):
             continue
         subdirs.append(subdir)
@@ -273,7 +288,7 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
     
     return samples
 
-def process_single_entry(entry, args_pocket, args_flex, args_normal_modes):
+def process_single_entry(entry, args_pocket, is_flex, normal_modes):
     try:
         pdbfile = Path(entry['pocket_p'])
         entry_ligand_p_w = Path(entry['ligand_p_w'])
@@ -286,12 +301,12 @@ def process_single_entry(entry, args_pocket, args_flex, args_normal_modes):
 
         ligand_w_data, pocket = process_raw_pair(
             pdb_model, ligand_w_mol, pocket_representation=args_pocket,
-            compute_nerf_params=args_flex, compute_bb_frames=args_flex,
-            nma_input=pdbfile if args_normal_modes else None)
+            compute_nerf_params=is_flex, compute_bb_frames=is_flex,
+            nma_input=pdbfile if normal_modes else None)
         ligand_l_data, _ = process_raw_pair(
             pdb_model, ligand_l_mol, pocket_representation=args_pocket,
-            compute_nerf_params=args_flex, compute_bb_frames=args_flex,
-            nma_input=pdbfile if args_normal_modes else None)
+            compute_nerf_params=is_flex, compute_bb_frames=is_flex,
+            nma_input=pdbfile if normal_modes else None)
             
         smpl_n = pdbfile.parent.name
         
@@ -351,10 +366,12 @@ def main():
         dirname += '_toy'
     processed_dir = Path(args.basedir, dirname)
     processed_dir.mkdir(parents=True, exist_ok=True)
+    chunks_dir = processed_dir / 'chunks'
+    chunks_dir.mkdir(exist_ok=True)
 
-    if (processed_dir / f'samples_{args.dpo_criterion}.csv').exists():
-        logging.info(f"Samples already computed for criterion {args.dpo_criterion}, loading from file")
-        samples = pd.read_csv(processed_dir / f'samples_{args.dpo_criterion}.csv')
+    if (chunks_dir / f'samples_{args.dpo_criterion}_{args.job_id}.csv').exists():
+        logging.info(f"Samples already computed for criterion {args.dpo_criterion} job {args.job_id}, loading from file")
+        samples = pd.read_csv(chunks_dir / f'samples_{args.dpo_criterion}_{args.job_id}.csv')
         samples = [dict(row) for _, row in samples.iterrows()]
         logging.info(f"Found {len(samples)} winning/losing samples")
     else:
@@ -367,9 +384,15 @@ def main():
         logging.info('Scanning sample directory...')
         samples_dir = Path(args.smplsdir)
         # scan dir
-        sample_dirs = scan_smpl_dir(samples_dir, precomp_scores=precomp_scores)
+        sample_dirs = scan_smpl_dir(samples_dir, precomp_scores=precomp_scores, job_id=args.job_id, n_jobs=args.n_jobs)
         
         logging.info(f'Found {len(sample_dirs)} valid sample directories')
+        
+        if args.toy and args.n_jobs > 1:
+            raise ValueError('Toy mode not supported with multiple jobs')
+        if args.toy:
+            args.toy_size = args.toy_size
+            
         logging.info('Computing scores...')
         samples = compute_scores(
             sample_dirs, evaluator, args.dpo_criterion,
@@ -378,7 +401,7 @@ def main():
             ignore_missing_scores=args.ignore_missing_scores
         )
         logging.info(f'Found {len(samples)} winning/losing samples, saving to file')
-        pd.DataFrame(samples).to_csv(Path(processed_dir, f'samples_{args.dpo_criterion}.csv'), index=False)
+        pd.DataFrame(samples).to_csv(Path(chunks_dir, f'samples_{args.dpo_criterion}_{args.job_id}.csv'), index=False)
 
     data_split = {}
     data_split['train'] = samples
@@ -398,20 +421,12 @@ def main():
 
         tic = time()
         
-        n_workers = min(os.cpu_count() // 2, 1)
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            results = list(
-                tqdm(executor.map(
-                        process_single_entry, 
-                        data_split[split], 
-                        itertools.repeat(args.pocket),
-                        itertools.repeat(args.flex),
-                        itertools.repeat(args.normal_modes)
-                    ), 
-                total=len(data_split[split]), desc=f"Processing {split} dataset")
+        pbar = tqdm(data_split[split])
+        for entry in pbar:
+            pbar.set_description(f'#failed: {len(failed)}')
+            res = process_single_entry(
+                entry, args.pocket, args.flex, args.normal_modes
             )
-
-        for res in results:
             if res['status'] == 'failed':
                 failed[(split, *res['key'])] = res['error']
                 continue
@@ -437,40 +452,12 @@ def main():
         data = {'ligands_w': ligands_w, 
                 'ligands_l': ligands_l,
                 'pockets': pockets}
-        torch.save(data, Path(processed_dir, f'{split}.pt'))
+        torch.save(data, Path(chunks_dir, f'{split}_{args.job_id}.pt'))
 
         if split == 'train':
-            np.save(Path(processed_dir, 'train_smiles.npy'), train_smiles)
+            np.save(Path(chunks_dir, f'train_smiles_{args.job_id}.npy'), train_smiles)
 
         print(f"Processing {split} set took {(time() - tic) / 60.0:.2f} minutes")
-
-    # cp stats from original dataset
-    size_distr_p = Path(args.datadir, 'size_distribution.npy')
-    type_histo_p = Path(args.datadir, 'ligand_type_histogram.npy')
-    bond_histo_p = Path(args.datadir, 'ligand_bond_type_histogram.npy')
-    metadata_p = Path(args.datadir, 'metadata.yml')
-    shutil.copy(size_distr_p, processed_dir)
-    shutil.copy(type_histo_p, processed_dir)
-    shutil.copy(bond_histo_p, processed_dir)
-    shutil.copy(metadata_p, processed_dir)
-
-    # cp val and test .pt and dirs
-    val_pt = Path(args.datadir, 'val.pt')
-    test_pt = Path(args.datadir, 'test.pt')
-    assert val_pt.exists() and test_pt.exists()
-    shutil.copy(val_pt, processed_dir)
-    shutil.copy(test_pt, processed_dir)
-
-    val_dir = Path(args.datadir, 'val')
-    test_dir = Path(args.datadir, 'test')
-    if val_dir.exists():
-        if (processed_dir / 'val').exists():
-            shutil.rmtree(processed_dir / 'val')
-        shutil.copytree(val_dir, processed_dir / 'val')
-    if test_dir.exists():
-        if (processed_dir / 'test').exists():
-            shutil.rmtree(processed_dir / 'test')
-        shutil.copytree(test_dir, processed_dir / 'test')
 
     # Write error report
     error_str = ""
@@ -482,7 +469,7 @@ def main():
         error_str += f"{'Error type':<15}:  {v[0]}\n"
         error_str += f"{'Error msg':<15}:  {v[1]}\n\n"
 
-    with open(Path(processed_dir, 'errors.txt'), 'w') as f:
+    with open(Path(chunks_dir, f'errors_{args.job_id}.txt'), 'w') as f:
         f.write(error_str)
 
     with open(Path(processed_dir, 'dataset_config.txt'), 'w') as f:
