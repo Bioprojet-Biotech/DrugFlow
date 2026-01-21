@@ -73,6 +73,7 @@ class DrugFlow(pl.LightningModule):
         set_default(train_params, "lr_step_size", None)
         set_default(train_params, "lr_gamma", None)
         set_default(train_params, "gnina", None)
+        set_default(train_params, "enamine_api_key", None)
         set_default(loss_params, "lambda_x", 1.0)
         set_default(loss_params, "lambda_clash", None)
         set_default(loss_params, "reduce", "mean")
@@ -151,6 +152,7 @@ class DrugFlow(pl.LightningModule):
         self.n_visualize_samples = eval_params.n_visualize_samples
         self.keep_frames = eval_params.keep_frames
         self.gnina = train_params.gnina
+        self.enamine_api_key = train_params.enamine_api_key
 
         # Feature encoders/decoders
         self.atom_encoder = atom_encoder
@@ -958,7 +960,11 @@ class DrugFlow(pl.LightningModule):
         agg_results = aggregated_metrics(results, self.evaluator.dtypes, VALIDITY_METRIC_NAME).fillna(0)
         agg_results['metric'] = agg_results['metric'].str.replace('.', '/')
 
-        col_results = collection_metrics(results, self.train_smiles, VALIDITY_METRIC_NAME, exclude_evaluators='fcd')
+        col_results = collection_metrics(
+            results, self.train_smiles,
+            api_key=self.enamine_api_key, validity_metric_name=VALIDITY_METRIC_NAME,
+            exclude_evaluators='fcd'
+        )
         col_results['metric'] = 'collection/' + col_results['metric']
 
         all_results = pd.concat([agg_results, col_results])

@@ -6,6 +6,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Union, Dict, Collection, Set, Optional
 import signal
+import requests
+import time
+import yaml
 import numpy as np
 import pandas as pd
 from unittest.mock import patch
@@ -173,7 +176,14 @@ class MolPropertyEvaluator(AbstractEvaluator):
 
 class PoseBustersEvaluator(AbstractEvaluator):
     ID = 'posebusters'
-    def __init__(self, pb_conf: str = 'dock'):
+    
+    def __init__(self, pb_conf: Optional[Union[str, Path]] = 'dock'):
+        if isinstance(pb_conf, str):
+            if '.yml' in pb_conf or '.yaml' in pb_conf:
+                pb_conf = Path(pb_conf)
+        if isinstance(pb_conf, Path):
+            with open(pb_conf, 'r') as f:
+                pb_conf = yaml.safe_load(f)
         self.posebusters = PoseBusters(config=pb_conf)
 
     @patch('rdkit.RDLogger.EnableLog', lambda x: None)
@@ -681,7 +691,7 @@ class REOSEvaluator(AbstractEvaluator):
 class FullEvaluator(AbstractEvaluator):
     def __init__(
             self,
-            pb_conf: str = 'dock',
+            pb_conf: Optional[Union[Path, str]] = None, 
             gnina: Optional[Union[Path, str]] = None, 
             reduce: Optional[Union[Path, str]] = None,
             connectivity_threshold: float = 1.0, 
@@ -689,6 +699,10 @@ class FullEvaluator(AbstractEvaluator):
             ignore: Set[str] = {'H'},
             exclude_evaluators: Collection[str] = [],
     ):
+        if pb_conf is None:
+            pb_conf = 'dock'
+        else:
+            pb_conf = str(pb_conf)
         all_evaluators = [
             RepresentationEvaluator(),
             MolPropertyEvaluator(),
@@ -909,18 +923,78 @@ class RingDistributionEvaluator(AbstractCollectionEvaluator):
         return out
 
 
+class EnamineAvailabilityEvaluator(AbstractCollectionEvaluator):
+    ID = 'enamine'
+
+    SERVER_URL = "https://real.enamine.net"
+    BATCH_SMILES_EXACT_STEREO_SEARCH_URL = f"{SERVER_URL}/api/v1/space/real/search-structure/batch/exact-stereo"
+    BATCH_SMILES_ANY_STEREO_SEARCH_URL = f"{SERVER_URL}/api/v1/space/real/search-structure/batch/any-stereo"
+
+    def __init__(self, api_key: str = None, use_stereo: bool = True):
+        if api_key is None:
+            api_key = os.getenv('REAL_API_KEY')
+        self.api_key = api_key
+        self.use_stereo = use_stereo
+
+    def evaluate(self, smiles: Collection[str]):
+        url = (self.BATCH_SMILES_EXACT_STEREO_SEARCH_URL if self.use_stereo
+               else self.BATCH_SMILES_ANY_STEREO_SEARCH_URL)
+        results = self.perform_search(smiles, url)
+        availability = sum(1 for available in results.values() if available) / len(smiles)
+        return {'enamine_availability': availability}
+
+    def perform_search(self, smiles_list, url):
+        # remove any smiles that are charged
+        smiles_list = [smi for smi in smiles_list if not ('+]' in smi or '-]' in smi)]
+        smiles_list = list(set(smiles_list))  # ensure uniqueness
+        response = requests.post(
+            url,
+            json={"smiles_list": smiles_list, "reaction_types": [0, 1050]},
+            headers={
+                "Content-Type": "application/json",
+                "X-API-KEY": self.api_key
+            }
+        )
+        response_data: list = response.json()
+
+        if isinstance(response_data, dict) and response_data['detail'].startswith('Invalid input smiles'):
+            invalid_smi = response_data['detail'].split('smiles:')[-1].strip()
+            # remove invalid smiles and retry
+            smiles_list = [smi for smi in smiles_list if smi != invalid_smi]
+            print(f"Invalid SMILES encountered: {invalid_smi}, retrying without it...")
+            return self.perform_search(smiles_list, url)
+        elif isinstance(response_data, dict) and response_data['detail'].startswith('Effective limit exceeded for a 10 min period'):
+            # sleep and retry
+            print("Rate limit exceeded, sleeping...")
+            time.sleep(600)
+            return self.perform_search(smiles_list, url)
+        elif isinstance(response_data, dict):
+            raise ValueError(f"Unexpected response format: {response_data}")
+
+        response_dict = {}
+        for entry in response_data:
+            response_dict[entry['query_smiles']] = entry['vSynt'] is not None
+        return response_dict
+
+
 class FullCollectionEvaluator(AbstractCollectionEvaluator):
-    def __init__(self, reference_smiles: Collection[str], exclude_evaluators: Collection[str] = []):
+    def __init__(self, reference_smiles: Collection[str], api_key: str = None, exclude_evaluators: Collection[str] = []):
         self.evaluators = [
             UniquenessEvaluator(),
             NoveltyEvaluator(reference_smiles=reference_smiles),
             FCDEvaluator(reference_smiles=reference_smiles),
             RingDistributionEvaluator(reference_smiles, jsd_on_k_most_freq=[10, 100, 1000, 10000]),
         ]
+        if api_key is not None:
+            self.evaluators.append(EnamineAvailabilityEvaluator(api_key=api_key))
+        else:
+            print(f'Evaluator [{EnamineAvailabilityEvaluator.ID}] is not included')
         for e in self.evaluators:
             if e.ID in exclude_evaluators:
                 print(f'Excluding CollectionEvaluator [{e.ID}]')
                 self.evaluators.remove(e)
+        for e in self.evaluators:
+            print(f'Including CollectionEvaluator [{e.ID}]')
 
     def evaluate(self, smiles):
         results = {}

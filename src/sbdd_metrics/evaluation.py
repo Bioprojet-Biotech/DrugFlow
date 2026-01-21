@@ -100,6 +100,7 @@ def aggregated_metrics(table: pd.DataFrame, data_types: Dict[str, Type], validit
 def collection_metrics(
         table: pd.DataFrame,
         reference_smiles: Collection[str],
+        api_key: str = None,
         validity_metric_name: str = None,
         exclude_evaluators: Collection[str] = [],
 ):
@@ -118,7 +119,7 @@ def collection_metrics(
     if validity_metric_name is not None:
         table = table[table[validity_metric_name]]
 
-    evaluator = FullCollectionEvaluator(reference_smiles, exclude_evaluators=exclude_evaluators)
+    evaluator = FullCollectionEvaluator(reference_smiles, api_key=api_key, exclude_evaluators=exclude_evaluators)
     smiles = table['representation.smiles'].values
     if len(smiles) == 0:
         print('No valid input molecules')
@@ -209,6 +210,7 @@ def compute_all_metrics_drugflow(
         in_dir: Path,
         gnina_path: Path,
         reduce_path: Path = None,
+        posebusters_conf_path: Path = None,
         reference_smiles_path: Path = None,
         n_samples: int = None,
         validity_metric_name: str = VALIDITY_METRIC_NAME,
@@ -216,7 +218,7 @@ def compute_all_metrics_drugflow(
         job_id: int = 0,
         n_jobs: int = 1,
 ):
-    evaluator = FullEvaluator(gnina=gnina_path, reduce=reduce_path, exclude_evaluators=exclude_evaluators)
+    evaluator = FullEvaluator(pb_conf=posebusters_conf_path, gnina=gnina_path, reduce=reduce_path, exclude_evaluators=exclude_evaluators)
     data = evaluate_drugflow(in_dir=in_dir, evaluator=evaluator, n_samples=n_samples, job_id=job_id, n_jobs=n_jobs)
     table_detailed = convert_data_to_table(data, evaluator.dtypes)
     table_aggregated = aggregated_metrics(

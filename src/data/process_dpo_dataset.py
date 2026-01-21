@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import random
 import shutil
+import os
 from time import time
 from collections import defaultdict
 from Bio.PDB import PDBParser
@@ -12,6 +13,9 @@ from tqdm import tqdm
 import pandas as pd
 from itertools import combinations
 import logging
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+import itertools
 
 import sys
 basedir = Path(__file__).resolve().parent.parent.parent
@@ -19,6 +23,7 @@ sys.path.append(str(basedir))
 
 from src.sbdd_metrics.metrics import REOSEvaluator, MedChemEvaluator, PoseBustersEvaluator, GninaEvalulator
 from src.data.data_utils import process_raw_pair, rdmol_to_smiles
+from src import utils
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -41,7 +46,19 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def scan_smpl_dir(samples_dir):
+def scan_smpl_dir(samples_dir, precomp_scores=None):
+    if precomp_scores is not None:
+        logging.info("Using precomputed scores to identify valid directories")
+        paths = [Path(p) for p in precomp_scores.index]
+        seen = set()
+        subdirs = []
+        for p in paths:
+            parent = p.parent
+            if parent not in seen:
+                seen.add(parent)
+                subdirs.append(parent)
+        return subdirs
+
     samples_dir = Path(samples_dir)
     subdirs = []
     for subdir in tqdm(samples_dir.iterdir(), desc='Scanning samples'):
@@ -59,9 +76,9 @@ def sample_dir_valid(samples_dir):
     ligands = list(samples_dir.glob('*_ligand.sdf'))
     if len(ligands) < 2:
         return False
-    for ligand in ligands:
-        if ligand.stat().st_size == 0:
-            return False
+    # for ligand in ligands:
+    #     if ligand.stat().st_size == 0:
+    #         return False
     return True
 
 def return_winning_losing_smpl(score_1, score_2, criterion):
@@ -112,15 +129,7 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
         
         target_samples = []
         for lig_path in ligands:
-            try:
-                mol = Chem.SDMolSupplier(str(lig_path))[0]
-                if mol is None:
-                    continue
-                smiles = rdmol_to_smiles(mol)
-            except Exception as e:
-                logging.error(f'Failed to read ligand: {lig_path} with error: {e}')
-                continue
-            
+            mol_props = {}
             if precomp_scores is not None and str(lig_path) in precomp_scores.index:
                 mol_props = precomp_scores.loc[str(lig_path)].to_dict()
                 if criterion == 'combined':
@@ -134,12 +143,25 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                         'gnina.vina_efficiency': mol_props['gnina.vina_efficiency'],
                         'combined': mol_props['gnina.vina_efficiency']
                     }
-            else:
-                mol_props = {}
-            if criterion not in mol_props:
-                if ignore_missing_scores:
-                    logging.debug(f'Missing {criterion} for ligand: {lig_path}')
+            
+            if criterion not in mol_props and ignore_missing_scores:
+                logging.debug(f'Missing {criterion} for ligand: {lig_path}')
+                continue
+
+            if 'posebusters.all' not in mol_props and ignore_missing_scores:
+                logging.debug(f'Missing PoseBusters for ligand: {lig_path}')
+                continue
+
+            try:
+                mol = Chem.SDMolSupplier(str(lig_path))[0]
+                if mol is None:
                     continue
+                smiles = rdmol_to_smiles(mol)
+            except Exception as e:
+                logging.error(f'Failed to read ligand: {lig_path} with error: {e}')
+                continue
+            
+            if criterion not in mol_props:
                 logging.debug(f'Recomputing {criterion} for ligand: {lig_path}')
                 try:
                     eval_res = evaluator.evaluate(mol)
@@ -152,9 +174,6 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                 score = mol_props[criterion]
 
             if 'posebusters.all' not in mol_props:
-                if ignore_missing_scores:
-                    logging.debug(f'Missing PoseBusters for ligand: {lig_path}')
-                    continue
                 logging.debug(f'Recomputing PoseBusters for ligand: {lig_path}')
                 try:
                     pose_eval_res = pose_evaluator.evaluate(lig_path, pocket)
@@ -167,9 +186,18 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                 if not pose_eval_res:
                     continue
             
+            if 'medchem.size' in mol_props:
+                size = mol_props['medchem.size']
+            else:
+                try:
+                    size = mol.GetNumAtoms()
+                except:
+                    size = 0
+
             target_samples.append({
                 'smiles': smiles,
                 'score': score,
+                'size': size,
                 'ligand_path': lig_path,
                 'pocket_path': pocket
             })
@@ -192,8 +220,13 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
             sign = return_winning_losing_smpl(s1['score'], s2['score'], criterion)
             if sign is None:
                 continue
-            score_diff = abs(s1['score'] - s2['score']) if not criterion == 'combined' else \
-                         abs(s1['score']['combined'] - s2['score']['combined'])
+            
+            if criterion in ['reos.all', 'enamine.avail']:
+                # prioritize pairs with similar size
+                score_diff = -abs(s1['size'] - s2['size'])
+            else:
+                score_diff = abs(s1['score'] - s2['score']) if not criterion == 'combined' else \
+                            abs(s1['score']['combined'] - s2['score']['combined'])
             if sign:
                 valid_pairs.append((s1, s2, score_diff))
             elif sign is False:
@@ -219,7 +252,9 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                 'score_l': losing['score'],
                 'pocket_p': winning['pocket_path'],
                 'ligand_p_w': winning['ligand_path'],
-                'ligand_p_l': losing['ligand_path']
+                'ligand_p_l': losing['ligand_path'],
+                'size_w': winning['size'],
+                'size_l': losing['size']
             }
             if isinstance(winning['score'], dict):
                 for k, v in winning['score'].items():
@@ -238,9 +273,53 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
     
     return samples
 
+def process_single_entry(entry, args_pocket, args_flex, args_normal_modes):
+    try:
+        pdbfile = Path(entry['pocket_p'])
+        entry_ligand_p_w = Path(entry['ligand_p_w'])
+        entry_ligand_p_l = Path(entry['ligand_p_l'])
+        
+        ligand_w_mol = Chem.SDMolSupplier(str(entry_ligand_p_w))[0]
+        ligand_l_mol = Chem.SDMolSupplier(str(entry_ligand_p_l))[0]
+
+        pdb_model = PDBParser(QUIET=True).get_structure('', pdbfile)[0]
+
+        ligand_w_data, pocket = process_raw_pair(
+            pdb_model, ligand_w_mol, pocket_representation=args_pocket,
+            compute_nerf_params=args_flex, compute_bb_frames=args_flex,
+            nma_input=pdbfile if args_normal_modes else None)
+        ligand_l_data, _ = process_raw_pair(
+            pdb_model, ligand_l_mol, pocket_representation=args_pocket,
+            compute_nerf_params=args_flex, compute_bb_frames=args_flex,
+            nma_input=pdbfile if args_normal_modes else None)
+            
+        smpl_n = pdbfile.parent.name
+        
+        return {
+            'status': 'success',
+            'ligand_w': ligand_w_data,
+            'ligand_l': ligand_l_data,
+            'pocket': pocket,
+            'smiles_w': rdmol_to_smiles(ligand_w_mol),
+            'smiles_l': rdmol_to_smiles(ligand_l_mol),
+            'ligand_w_name': f'{smpl_n}__{entry_ligand_p_w.stem}.sdf',
+            'ligand_l_name': f'{smpl_n}__{entry_ligand_p_l.stem}.sdf',
+            'pocket_name': f'{smpl_n}__{pdbfile.stem}.pdb'
+        }
+
+    except (KeyError, AssertionError, FileNotFoundError, IndexError,
+            ValueError, AttributeError) as e:
+        return {
+            'status': 'failed',
+            'key': (entry['pocket_p'], str(entry_ligand_p_w), str(entry_ligand_p_l)),
+            'error': (type(e).__name__, str(e))
+        }
+
 def main():
     args = parse_args()
+    utils.setup_logging()
 
+    logging.info(f"Processing DPO dataset with criterion: {args.dpo_criterion}")
     if 'reos' in args.dpo_criterion:
         evaluator = REOSEvaluator()
     elif 'medchem' in args.dpo_criterion:
@@ -279,22 +358,25 @@ def main():
         samples = [dict(row) for _, row in samples.iterrows()]
         logging.info(f"Found {len(samples)} winning/losing samples")
     else:
-        logging.info('Scanning sample directory...')
-        samples_dir = Path(args.smplsdir)
-        # scan dir
-        sample_dirs = scan_smpl_dir(samples_dir)
+        precomp_scores = None
         if args.metrics_detailed:
             logging.info(f'Loading precomputed scores from {args.metrics_detailed}')
             precomp_scores = pd.read_csv(args.metrics_detailed)
             precomp_scores = precomp_scores.set_index('sdf_file')
-        else:
-            precomp_scores = None
+
+        logging.info('Scanning sample directory...')
+        samples_dir = Path(args.smplsdir)
+        # scan dir
+        sample_dirs = scan_smpl_dir(samples_dir, precomp_scores=precomp_scores)
+        
         logging.info(f'Found {len(sample_dirs)} valid sample directories')
         logging.info('Computing scores...')
-        samples = compute_scores(sample_dirs, evaluator, args.dpo_criterion, 
-                                 n_pairs=args.n_pairs, toy=args.toy, toy_size=args.toy_size,
-                                    precomp_scores=precomp_scores,
-                                    ignore_missing_scores=args.ignore_missing_scores)
+        samples = compute_scores(
+            sample_dirs, evaluator, args.dpo_criterion,
+            n_pairs=args.n_pairs, toy=args.toy, toy_size=args.toy_size,
+            precomp_scores=precomp_scores,
+            ignore_missing_scores=args.ignore_missing_scores
+        )
         logging.info(f'Found {len(samples)} winning/losing samples, saving to file')
         pd.DataFrame(samples).to_csv(Path(processed_dir, f'samples_{args.dpo_criterion}.csv'), index=False)
 
@@ -315,35 +397,29 @@ def main():
         pockets = defaultdict(list)
 
         tic = time()
-        pbar = tqdm(data_split[split])
-        for entry in pbar:
+        
+        n_workers = min(os.cpu_count() // 2, 1)
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            results = list(
+                tqdm(executor.map(
+                        process_single_entry, 
+                        data_split[split], 
+                        itertools.repeat(args.pocket),
+                        itertools.repeat(args.flex),
+                        itertools.repeat(args.normal_modes)
+                    ), 
+                total=len(data_split[split]), desc=f"Processing {split} dataset")
+            )
 
-            pbar.set_description(f'#failed: {len(failed)}')
-
-            pdbfile = Path(entry['pocket_p'])
-            entry['ligand_p_w'] = Path(entry['ligand_p_w'])
-            entry['ligand_p_l'] = Path(entry['ligand_p_l'])
-            entry['ligand_w'] = Chem.SDMolSupplier(str(entry['ligand_p_w']))[0]
-            entry['ligand_l'] = Chem.SDMolSupplier(str(entry['ligand_p_l']))[0]
-
-            try:
-                pdb_model = PDBParser(QUIET=True).get_structure('', pdbfile)[0]
-
-                ligand_w, pocket = process_raw_pair(
-                    pdb_model, entry['ligand_w'], pocket_representation=args.pocket,
-                    compute_nerf_params=args.flex, compute_bb_frames=args.flex,
-                    nma_input=pdbfile if args.normal_modes else None)
-                ligand_l, _ = process_raw_pair(
-                    pdb_model, entry['ligand_l'], pocket_representation=args.pocket,
-                    compute_nerf_params=args.flex, compute_bb_frames=args.flex,
-                    nma_input=pdbfile if args.normal_modes else None)
-
-            except (KeyError, AssertionError, FileNotFoundError, IndexError,
-                    ValueError, AttributeError) as e:
-                failed[(split, entry['ligand_p_w'], entry['ligand_p_l'],  pdbfile)] \
-                    = (type(e).__name__, str(e))
+        for res in results:
+            if res['status'] == 'failed':
+                failed[(split, *res['key'])] = res['error']
                 continue
-
+            
+            ligand_w = res['ligand_w']
+            ligand_l = res['ligand_l']
+            pocket = res['pocket']
+            
             nerf_keys = ['fixed_coord', 'atom_mask', 'nerf_indices', 'length', 'theta', 'chi', 'ddihedral', 'chi_indices']
             for k in ['x', 'one_hot', 'bonds', 'bond_one_hot', 'v', 'nma_vec'] + nerf_keys + ['axis_angle']:
                 if k in ligand_w:
@@ -351,16 +427,12 @@ def main():
                     ligands_l[k].append(ligand_l[k])
                 if k in pocket:
                     pockets[k].append(pocket[k])
-
-            smpl_n = pdbfile.parent.name
-            pocket_file = f'{smpl_n}__{pdbfile.stem}.pdb'
-            ligand_file_w = f'{smpl_n}__{entry["ligand_p_w"].stem}.sdf'
-            ligand_file_l = f'{smpl_n}__{entry["ligand_p_l"].stem}.sdf'
-            ligands_w['name'].append(ligand_file_w)
-            ligands_l['name'].append(ligand_file_l)
-            pockets['name'].append(pocket_file)
-            train_smiles.append(rdmol_to_smiles(entry['ligand_w']))
-            train_smiles.append(rdmol_to_smiles(entry['ligand_l']))
+            
+            ligands_w['name'].append(res['ligand_w_name'])
+            ligands_l['name'].append(res['ligand_l_name'])
+            pockets['name'].append(res['pocket_name'])
+            train_smiles.append(res['smiles_w'])
+            train_smiles.append(res['smiles_l'])
 
         data = {'ligands_w': ligands_w, 
                 'ligands_l': ligands_l,
