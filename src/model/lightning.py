@@ -73,7 +73,7 @@ class DrugFlow(pl.LightningModule):
         set_default(train_params, "lr_step_size", None)
         set_default(train_params, "lr_gamma", None)
         set_default(train_params, "gnina", None)
-        set_default(train_params, "enamine_api_key", None)
+        set_default(train_params, "freedom_space_path", None)
         set_default(loss_params, "lambda_x", 1.0)
         set_default(loss_params, "lambda_clash", None)
         set_default(loss_params, "reduce", "mean")
@@ -151,8 +151,12 @@ class DrugFlow(pl.LightningModule):
         self.n_eval_samples = eval_params.n_eval_samples
         self.n_visualize_samples = eval_params.n_visualize_samples
         self.keep_frames = eval_params.keep_frames
-        self.gnina = train_params.gnina
-        self.enamine_api_key = train_params.enamine_api_key
+        self.mol_checks_metrics = getattr(eval_params, "mol_checks_metrics", [])
+        self.check_enamine_avail = getattr(eval_params, "check_enamine_avail", False)
+        self.check_freedom_avail = getattr(eval_params, "check_freedom_avail", False)
+        self.gnina = getattr(train_params, "gnina", None)
+        self.enamine_api_key = getattr(train_params, "enamine_api_key", None)
+        self.freedom_space_path = getattr(train_params, "freedom_space_path", None)
 
         # Feature encoders/decoders
         self.atom_encoder = atom_encoder
@@ -452,6 +456,8 @@ class DrugFlow(pl.LightningModule):
 
     def log_metrics(self, metrics_dict, split, batch_size=None, **kwargs):
         for m, value in metrics_dict.items():
+            if isinstance(value, str):
+                continue
             self.log(f'{m}/{split}', value, batch_size=batch_size, **kwargs)
 
     def aggregate_metrics(self, step_outputs, prefix):
@@ -962,13 +968,46 @@ class DrugFlow(pl.LightningModule):
 
         col_results = collection_metrics(
             results, self.train_smiles,
-            api_key=self.enamine_api_key, validity_metric_name=VALIDITY_METRIC_NAME,
-            exclude_evaluators='fcd'
+            api_key=self.enamine_api_key,
+            freedom_space_path=self.freedom_space_path,
+            validity_metric_name=VALIDITY_METRIC_NAME,
+            exclude_evaluators=['fcd', 'ring_system_distribution']
         )
         col_results['metric'] = 'collection/' + col_results['metric']
 
         all_results = pd.concat([agg_results, col_results])
         out.update(**dict(all_results[['metric', 'value']].values))
+
+        if self.mol_checks_metrics:
+            available_metrics = [m for m in self.mol_checks_metrics if m in results.columns]
+            if len(available_metrics) != len(self.mol_checks_metrics):
+                 print(f"Warning: Not all metrics requested for check are available. Requested: {self.mol_checks_metrics}, Available: {available_metrics}")
+
+            count = 0
+            if available_metrics:
+                passed = results[available_metrics].fillna(False).astype(bool).all(axis=1)
+                passed_smiles = set(results.loc[passed, 'representation.smiles'].dropna().unique())
+                out['collection/unique_mols_passing_checks'] = len(passed_smiles)
+                if self.check_enamine_avail:
+                    enamine_str = out['collection/enamine_available_smiles']
+                    if isinstance(enamine_str, str) and enamine_str:
+                         available_smiles = set(enamine_str.split(','))
+                         count = len(passed_smiles.intersection(available_smiles))
+                    else:
+                        print("Warning: Enamine available smiles empty/invalid.")
+                elif self.check_freedom_avail:
+                    freedom_str = out['collection/freedom_available_smiles']
+                    if isinstance(freedom_str, str) and freedom_str:
+                         freedom_smiles = set(freedom_str.split(','))
+                         count = len(passed_smiles.intersection(freedom_smiles))
+                    else:
+                        print("Warning: Freedom space smiles empty/invalid.")
+                else:
+                    count = len(passed_smiles)
+            else:
+                print("Warning: No metrics available for counting molecules passing checks.")
+
+            out['collection/final_mols_passing_checks'] = count
 
         return out
 

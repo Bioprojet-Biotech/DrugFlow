@@ -1,6 +1,7 @@
 import multiprocessing
 import subprocess
 import tempfile
+import os
 from abc import abstractmethod
 from collections import defaultdict
 from pathlib import Path
@@ -940,12 +941,21 @@ class EnamineAvailabilityEvaluator(AbstractCollectionEvaluator):
         url = (self.BATCH_SMILES_EXACT_STEREO_SEARCH_URL if self.use_stereo
                else self.BATCH_SMILES_ANY_STEREO_SEARCH_URL)
         results = self.perform_search(smiles, url)
-        availability = sum(1 for available in results.values() if available) / len(smiles)
-        return {'enamine_availability': availability}
+        availability = sum(1 for available in results.values() if available)
+        fraction = availability / len(results)
+        n_searched = len(results)
+        available_smiles = [smi for smi, available in results.items() if available]
+        available_smiles = ','.join(available_smiles)
+        return {
+            'enamine_availability_count': availability,
+            'enamine_availability': fraction,
+            'enamine_n_searched': n_searched,
+            'enamine_available_smiles': available_smiles,
+        }
 
     def perform_search(self, smiles_list, url):
         # remove any smiles that are charged
-        smiles_list = [smi for smi in smiles_list if not ('+]' in smi or '-]' in smi)]
+        smiles_list = [smi for smi in smiles_list if not ('+]' in smi or '-]' in smi or '.' in smi)]
         smiles_list = list(set(smiles_list))  # ensure uniqueness
         response = requests.post(
             url,
@@ -977,22 +987,93 @@ class EnamineAvailabilityEvaluator(AbstractCollectionEvaluator):
         return response_dict
 
 
+class FreedomSpaceEvaluator(AbstractCollectionEvaluator):
+    ID = 'freedom_space'
+
+    def __init__(self, freedom_space_path: str = None, similarity_threshold: float = 0.8):
+        if freedom_space_path is None:
+            raise ValueError('freedom_space_path must be provided for FreedomSpaceEvaluator')
+        from .freedom_space import FreedomSimilarityCalc
+        self.calculator = FreedomSimilarityCalc(db_path=freedom_space_path)
+        self.similarity_threshold = similarity_threshold
+
+    def evaluate(self, smiles: Collection[str]):
+        smiles_filt = list(set([
+            smi for smi in smiles
+            if smi is not None and smi != '' and not any(
+                c in smi for c in ['*', 'R', '.']
+            )
+        ]))
+        
+        mols = []
+        valid_smiles = []
+        for smi in smiles_filt:
+            m = Chem.MolFromSmiles(smi)
+            if m:
+                mols.append(m)
+                valid_smiles.append(smi)
+        
+        scores = np.array([])
+        if mols:
+            try:
+                scores = np.array(self.calculator(mols))
+            except Exception as e:
+                print(f"Error during Freedom Space search: {e}")
+                return {
+                    'freedom_space_similarity_mean': None,
+                    'freedom_space_similarity_median': None,
+                    'freedom_availability_count': None,
+                    'freedom_availability': None,
+                    'freedom_n_searched': len(valid_smiles),
+                    'freedom_available_smiles': None
+                }
+                
+        mean_score = float(np.mean(scores)) if len(scores) > 0 else 0.0
+        median_score = float(np.median(scores)) if len(scores) > 0 else 0.0
+        
+        availability_mask = scores >= self.similarity_threshold
+        availability_count = int(np.sum(availability_mask))
+        n_searched = len(scores)
+        fraction = availability_count / n_searched if n_searched > 0 else 0.0
+        
+        available_smiles = []
+        if n_searched > 0:
+            available_smiles = [valid_smiles[i] for i in range(len(scores)) if availability_mask[i]]
+
+        return {
+            'freedom_space_similarity_mean': mean_score,
+            'freedom_space_similarity_median': median_score,
+            'freedom_availability_count': availability_count,
+            'freedom_availability': fraction,
+            'freedom_n_searched': n_searched,
+            'freedom_available_smiles': ','.join(available_smiles),
+        }
+
+
 class FullCollectionEvaluator(AbstractCollectionEvaluator):
-    def __init__(self, reference_smiles: Collection[str], api_key: str = None, exclude_evaluators: Collection[str] = []):
-        self.evaluators = [
-            UniquenessEvaluator(),
-            NoveltyEvaluator(reference_smiles=reference_smiles),
-            FCDEvaluator(reference_smiles=reference_smiles),
-            RingDistributionEvaluator(reference_smiles, jsd_on_k_most_freq=[10, 100, 1000, 10000]),
-        ]
-        if api_key is not None:
+    def __init__(self, reference_smiles: Collection[str], api_key: str = None, 
+                 freedom_space_path: str = None, exclude_evaluators: Collection[str] = []):
+        self.evaluators = []
+
+        if UniquenessEvaluator.ID not in exclude_evaluators:
+            self.evaluators.append(UniquenessEvaluator())
+        if NoveltyEvaluator.ID not in exclude_evaluators:
+            self.evaluators.append(NoveltyEvaluator(reference_smiles=reference_smiles))
+        if FCDEvaluator.ID not in exclude_evaluators:
+            self.evaluators.append(FCDEvaluator(reference_smiles=reference_smiles))
+        if RingDistributionEvaluator.ID not in exclude_evaluators:
+            self.evaluators.append(RingDistributionEvaluator(reference_smiles, jsd_on_k_most_freq=[10, 100, 1000, 10000]))
+
+        if api_key is not None and EnamineAvailabilityEvaluator.ID not in exclude_evaluators:
             self.evaluators.append(EnamineAvailabilityEvaluator(api_key=api_key))
         else:
             print(f'Evaluator [{EnamineAvailabilityEvaluator.ID}] is not included')
-        for e in self.evaluators:
-            if e.ID in exclude_evaluators:
-                print(f'Excluding CollectionEvaluator [{e.ID}]')
-                self.evaluators.remove(e)
+        
+        if freedom_space_path is not None and FreedomSpaceEvaluator.ID not in exclude_evaluators:
+             self.evaluators.append(FreedomSpaceEvaluator(freedom_space_path=freedom_space_path))
+        else:
+             print(f'Evaluator [{FreedomSpaceEvaluator.ID}] is not included')
+
         for e in self.evaluators:
             print(f'Including CollectionEvaluator [{e.ID}]')
 

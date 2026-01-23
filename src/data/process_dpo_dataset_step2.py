@@ -14,7 +14,7 @@ from src import utils
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dpo-criterion', type=str, default='reos.all', 
-                        choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency','enamine.avail','combined'])
+                        choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency','enamine.avail','combined','freedom_space.max_similarity'])
     parser.add_argument('--basedir', type=Path, default=None)
     parser.add_argument('--pocket', type=str, default='CA+',
                         choices=['side_chain_bead', 'CA+'])

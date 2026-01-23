@@ -101,6 +101,7 @@ def collection_metrics(
         table: pd.DataFrame,
         reference_smiles: Collection[str],
         api_key: str = None,
+        freedom_space_path: str = None,
         validity_metric_name: str = None,
         exclude_evaluators: Collection[str] = [],
 ):
@@ -119,7 +120,12 @@ def collection_metrics(
     if validity_metric_name is not None:
         table = table[table[validity_metric_name]]
 
-    evaluator = FullCollectionEvaluator(reference_smiles, api_key=api_key, exclude_evaluators=exclude_evaluators)
+    evaluator = FullCollectionEvaluator(
+        reference_smiles,
+        api_key=api_key,
+        freedom_space_path=freedom_space_path,
+        exclude_evaluators=exclude_evaluators
+    )
     smiles = table['representation.smiles'].values
     if len(smiles) == 0:
         print('No valid input molecules')

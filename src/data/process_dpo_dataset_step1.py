@@ -28,7 +28,8 @@ def parse_args():
     parser.add_argument('--ignore-missing-scores', action='store_true')
     parser.add_argument('--datadir', type=Path, required=True)
     parser.add_argument('--dpo-criterion', type=str, default='reos.all', 
-                        choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency','enamine.avail','combined'])
+                        choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency',
+                                 'enamine.avail','combined','freedom_space.max_similarity'])
     parser.add_argument('--basedir', type=Path, default=None)
     parser.add_argument('--pocket', type=str, default='CA+',
                         choices=['side_chain_bead', 'CA+'])
@@ -115,6 +116,10 @@ def return_winning_losing_smpl(score_1, score_2, criterion):
         return score_1 < score_2
     elif criterion == 'enamine.avail':
         if score_1 == score_2:
+            return None
+        return score_1 > score_2
+    elif criterion == 'freedom_space.max_similarity':
+        if np.abs(score_1 - score_2) < 0.65:
             return None
         return score_1 > score_2
     elif criterion == 'combined':
@@ -209,6 +214,10 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                 except:
                     size = 0
 
+            if isinstance(score, (int, float, np.floating, np.integer)):
+                if np.isnan(score):
+                    continue
+
             target_samples.append({
                 'smiles': smiles,
                 'score': score,
@@ -239,6 +248,12 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
             if criterion in ['reos.all', 'enamine.avail']:
                 # prioritize pairs with similar size
                 score_diff = -abs(s1['size'] - s2['size'])
+            elif criterion in ['freedom_space.max_similarity']:
+                # bucket the similarity difference, align size
+                sim_diff = abs(s1['score'] - s2['score'])
+                bucket = int(sim_diff * 5)
+                size_diff = abs(s1['size'] - s2['size'])
+                score_diff = bucket * 1000 - size_diff + sim_diff
             else:
                 score_diff = abs(s1['score'] - s2['score']) if not criterion == 'combined' else \
                             abs(s1['score']['combined'] - s2['score']['combined'])
@@ -341,18 +356,12 @@ def main():
         evaluator = MedChemEvaluator()
     elif 'gnina' in args.dpo_criterion:
         evaluator = GninaEvalulator(gnina=args.gnina)
-    elif 'combined' in args.dpo_criterion:
+    elif 'combined' in args.dpo_criterion or args.dpo_criterion == 'enamine.avail' or args.dpo_criterion == 'freedom_space.max_similarity':
         evaluator = None # for combined criterion, metrics have to be computed separately
         if args.metrics_detailed is None:
-            raise ValueError('For combined criterion, detailed metrics file has to be provided')
+            raise ValueError('For combined/synthezisability criterion, detailed metrics file has to be provided')
         if not args.ignore_missing_scores:
-            raise ValueError('For combined criterion, --ignore-missing-scores flag has to be set')
-    elif 'enamine' in args.dpo_criterion:
-        evaluator = None # enamine availability is checked via detailed metrics file
-        if args.metrics_detailed is None:
-            raise ValueError('For enamine.avail criterion, detailed metrics file has to be provided')
-        if not args.ignore_missing_scores:
-            raise ValueError('For enamine.avail criterion, --ignore-missing-scores flag has to be set')
+            raise ValueError('For combined/synthezisability criterion, --ignore-missing-scores flag has to be set')
     else:
         raise ValueError(f"Unknown DPO criterion: {args.dpo_criterion}")
     
@@ -379,6 +388,7 @@ def main():
         if args.metrics_detailed:
             logging.info(f'Loading precomputed scores from {args.metrics_detailed}')
             precomp_scores = pd.read_csv(args.metrics_detailed)
+            precomp_scores = precomp_scores.drop_duplicates(subset=['sdf_file'])
             precomp_scores = precomp_scores.set_index('sdf_file')
 
         logging.info('Scanning sample directory...')

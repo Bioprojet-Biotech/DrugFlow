@@ -160,6 +160,19 @@ if __name__ == "__main__":
         ),
     ]
 
+    if hasattr(args.eval_params, 'mol_checks_metrics') and args.eval_params.mol_checks_metrics:
+        print(f"Adding ModelCheckpoint for collection/final_mols_passing_checks/val")
+        checkpoint_callbacks.append(
+            pl.callbacks.ModelCheckpoint(
+                dirpath=Path(checkpoints_root_dir, 'mol_checks'),
+                filename="epoch_{epoch:04d}_passed_{collection/final_mols_passing_checks/val:.0f}",
+                monitor="collection/final_mols_passing_checks/val",
+                save_top_k=5,
+                mode="max",
+                auto_insert_metric_name=False,
+            )
+        )
+
     # For learning rate logging
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')
 
