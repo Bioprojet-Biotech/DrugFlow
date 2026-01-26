@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument('--datadir', type=Path, required=True)
     parser.add_argument('--dpo-criterion', type=str, default='reos.all', 
                         choices=['reos.all', 'medchem.sa', 'medchem.qed', 'gnina.vina_efficiency',
-                                 'enamine.avail','combined','freedom_space.max_similarity'])
+                                 'enamine.avail','combined','freedom_space.max_similarity','freedom_space.avail'])
     parser.add_argument('--basedir', type=Path, default=None)
     parser.add_argument('--pocket', type=str, default='CA+',
                         choices=['side_chain_bead', 'CA+'])
@@ -122,6 +122,10 @@ def return_winning_losing_smpl(score_1, score_2, criterion):
         if np.abs(score_1 - score_2) < 0.65:
             return None
         return score_1 > score_2
+    elif criterion == 'freedom_space.avail':
+        if max(score_1, score_2) < 0.99 or np.abs(score_1 - score_2) < 0.75:
+            return None
+        return score_1 > score_2
     elif criterion == 'combined':
         score_reos_1, score_reos_2 = score_1['reos.all'], score_2['reos.all']
         score_sa_1, score_sa_2 = score_1['medchem.sa'], score_2['medchem.sa']
@@ -163,6 +167,8 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
                         'gnina.vina_efficiency': mol_props['gnina.vina_efficiency'],
                         'combined': mol_props['gnina.vina_efficiency']
                     }
+                if 'freedom_space.avail' not in mol_props and 'freedom_space.max_similarity' in mol_props:
+                    mol_props['freedom_space.avail'] = mol_props['freedom_space.max_similarity']
             
             if criterion not in mol_props and ignore_missing_scores:
                 logging.debug(f'Missing {criterion} for ligand: {lig_path}')
@@ -245,7 +251,7 @@ def compute_scores(sample_dirs, evaluator, criterion, n_pairs=5, toy=False, toy_
             if sign is None:
                 continue
             
-            if criterion in ['reos.all', 'enamine.avail']:
+            if criterion in ['reos.all', 'enamine.avail', 'freedom_space.avail']:
                 # prioritize pairs with similar size
                 score_diff = -abs(s1['size'] - s2['size'])
             elif criterion in ['freedom_space.max_similarity']:
@@ -356,7 +362,7 @@ def main():
         evaluator = MedChemEvaluator()
     elif 'gnina' in args.dpo_criterion:
         evaluator = GninaEvalulator(gnina=args.gnina)
-    elif 'combined' in args.dpo_criterion or args.dpo_criterion == 'enamine.avail' or args.dpo_criterion == 'freedom_space.max_similarity':
+    elif 'combined' in args.dpo_criterion or args.dpo_criterion == 'enamine.avail' or 'freedom_space' in args.dpo_criterion:
         evaluator = None # for combined criterion, metrics have to be computed separately
         if args.metrics_detailed is None:
             raise ValueError('For combined/synthezisability criterion, detailed metrics file has to be provided')

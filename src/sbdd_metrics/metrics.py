@@ -942,7 +942,7 @@ class EnamineAvailabilityEvaluator(AbstractCollectionEvaluator):
                else self.BATCH_SMILES_ANY_STEREO_SEARCH_URL)
         results = self.perform_search(smiles, url)
         availability = sum(1 for available in results.values() if available)
-        fraction = availability / len(results)
+        fraction = availability / len(results) if len(results) > 0 else 0.0
         n_searched = len(results)
         available_smiles = [smi for smi, available in results.items() if available]
         available_smiles = ','.join(available_smiles)
@@ -1012,21 +1012,20 @@ class FreedomSpaceEvaluator(AbstractCollectionEvaluator):
             if m:
                 mols.append(m)
                 valid_smiles.append(smi)
-        
+        default_return = {
+            'freedom_space_similarity_mean': None,
+            'freedom_space_similarity_median': None,
+            'freedom_availability_count': None,
+            'freedom_availability': None,
+            'freedom_n_searched': len(valid_smiles),
+            'freedom_available_smiles': None
+        }
         scores = np.array([])
-        if mols:
-            try:
-                scores = np.array(self.calculator(mols))
-            except Exception as e:
-                print(f"Error during Freedom Space search: {e}")
-                return {
-                    'freedom_space_similarity_mean': None,
-                    'freedom_space_similarity_median': None,
-                    'freedom_availability_count': None,
-                    'freedom_availability': None,
-                    'freedom_n_searched': len(valid_smiles),
-                    'freedom_available_smiles': None
-                }
+        try:
+            scores = np.array(self.calculator(mols))
+        except Exception as e:
+            print(f"Error during Freedom Space search: {e}")
+            return default_return
                 
         mean_score = float(np.mean(scores)) if len(scores) > 0 else 0.0
         median_score = float(np.median(scores)) if len(scores) > 0 else 0.0

@@ -989,14 +989,14 @@ class DrugFlow(pl.LightningModule):
                 passed_smiles = set(results.loc[passed, 'representation.smiles'].dropna().unique())
                 out['collection/unique_mols_passing_checks'] = len(passed_smiles)
                 if self.check_enamine_avail:
-                    enamine_str = out['collection/enamine_available_smiles']
+                    enamine_str = out['collection/enamine_available_smiles'] if 'collection/enamine_available_smiles' in out else ''
                     if isinstance(enamine_str, str) and enamine_str:
                          available_smiles = set(enamine_str.split(','))
                          count = len(passed_smiles.intersection(available_smiles))
                     else:
                         print("Warning: Enamine available smiles empty/invalid.")
                 elif self.check_freedom_avail:
-                    freedom_str = out['collection/freedom_available_smiles']
+                    freedom_str = out['collection/freedom_available_smiles'] if 'collection/freedom_available_smiles' in out else ''
                     if isinstance(freedom_str, str) and freedom_str:
                          freedom_smiles = set(freedom_str.split(','))
                          count = len(passed_smiles.intersection(freedom_smiles))
