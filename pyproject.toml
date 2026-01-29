@@ -1,0 +1,29 @@
+[project]
+name = "drugflow"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.11.8"
+dependencies = [
+    "biopython==1.83",
+    "fcd>=1.2.2",
+    "mdanalysis==2.7.0",
+    "pandas>=2.0.3",
+    "posebusters>=0.3.1",
+    "prody>=2.4.0",
+    "prolif>=2.0.3",
+    "pytorch-lightning>=2.5.5",
+    "rdkit==2023.9.6",
+    "scipy==1.12.0",
+    "torch==2.2.1",
+    "torch-geometric>=2.7.0",
+    "torch-scatter>=2.1.2",
+    "useful-rdkit-utils==0.65",
+    "wandb==0.16.3",
+    "webdataset==0.2.86",
+]
+
+[[tool.uv.index]]
+    name = "pytorch-cu126"
+    url = "https://download.pytorch.org/whl/cu126"
+    explicit = true
